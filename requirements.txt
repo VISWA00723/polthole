@@ -1,0 +1,14 @@
+torch
+torchvision
+transformers
+timm
+opencv-python
+numpy
+pillow
+scikit-learn
+matplotlib
+pandas
+pyttsx3
+kaggle
+gTTS
+pytest
