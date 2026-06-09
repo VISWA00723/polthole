@@ -78,6 +78,11 @@ class RoadHazardIntelligenceSystem:
             bike_speed=bike_speed
         )
         
+        # Fetch deep learning multi-task predictions if available
+        dl_road_score = getattr(self.segmenter, 'latest_road_score', None)
+        dl_severity = getattr(self.segmenter, 'latest_severity', None)
+        dl_risk_score = getattr(self.segmenter, 'latest_risk_score', None)
+        
         diagnostics = {
             'hazards': [
                 {
@@ -86,12 +91,18 @@ class RoadHazardIntelligenceSystem:
                     'distance_m': h['distance_m'],
                     'depth_cm': h['depth_cm'],
                     'area_m2': h['area_m2'],
+                    'width_m': h.get('width_m', 0.0),
+                    'length_m': h.get('length_m', 0.0),
+                    'volume_m3': h.get('volume_m3', 0.0),
                     'risk_score': h['risk_score'],
                     'risk_level': h['risk_level']
                 } for h in hazards
             ],
             'road_score': road_score,
-            'road_label': road_label
+            'road_label': road_label,
+            'dl_road_score': dl_road_score,
+            'dl_severity': dl_severity,
+            'dl_risk_score': dl_risk_score
         }
         
         return hud_frame, diagnostics
@@ -135,10 +146,13 @@ def main():
         t0 = time.time()
         hud_frame, diagnostics = system.process_frame(frame, args.speed)
         print(f"Frame processed in {time.time() - t0:.3f}s")
-        print(f"Road Quality Score: {diagnostics['road_score']}/10 ({diagnostics['road_label']})")
+        print(f"Road Quality Score (Physics): {diagnostics['road_score']}/10 ({diagnostics['road_label']})")
+        if diagnostics['dl_road_score'] is not None:
+            print(f"Road Quality Score (Deep Learning): {diagnostics['dl_road_score']:.2f}/10")
         print(f"Detected Hazards Count: {len(diagnostics['hazards'])}")
         for idx, h in enumerate(diagnostics['hazards']):
-            print(f"  [{idx+1}] {h['label'].upper()} - Dist: {h['distance_m']}m, Depth: {h['depth_cm']}cm, Area: {h['area_m2']}m2, Risk: {h['risk_score']}% ({h['risk_level']})")
+            dimensions_str = f"W: {h['width_m']}m, L: {h['length_m']}m, Vol: {h['volume_m3']}m3"
+            print(f"  [{idx+1}] {h['label'].upper()} - Dist: {h['distance_m']}m, Depth: {h['depth_cm']}cm, Area: {h['area_m2']}m2 ({dimensions_str}), Risk: {h['risk_score']}% ({h['risk_level']})")
             
         if args.output:
             cv2.imwrite(args.output, hud_frame)

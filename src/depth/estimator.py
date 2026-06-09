@@ -83,7 +83,7 @@ class RoadHazardEstimator:
 
     def estimate_hazard_metrics(self, hazard, calibrated_Z):
         """
-        Estimates the distance, depth, and physical area of a detected hazard.
+        Estimates the distance, depth, physical area, width, length, and volume of a detected hazard.
         
         Args:
             hazard (dict): Hazard dict from segmentation inference
@@ -93,14 +93,17 @@ class RoadHazardEstimator:
                 {
                     'distance_m': float,
                     'depth_cm': float,
-                    'area_m2': float
+                    'area_m2': float,
+                    'width_m': float,
+                    'length_m': float,
+                    'volume_m3': float
                 }
         """
         mask = hazard['mask']
         y_indices, x_indices = np.where(mask)
         
         if len(y_indices) == 0:
-            return {'distance_m': 99.0, 'depth_cm': 0.0, 'area_m2': 0.0}
+            return {'distance_m': 99.0, 'depth_cm': 0.0, 'area_m2': 0.0, 'width_m': 0.0, 'length_m': 0.0, 'volume_m3': 0.0}
             
         # 1. Distance from bike: The closest point of the hazard (minimum distance value)
         hazard_distances = calibrated_Z[mask == 1]
@@ -114,6 +117,16 @@ class RoadHazardEstimator:
         pixel_zs = calibrated_Z[y_indices, x_indices]
         pixel_areas = (pixel_zs ** 2) / (f ** 2 * cos_tilt)
         area_m2 = float(np.sum(pixel_areas))
+        
+        # Calculate physical width and length from ground coordinates
+        X_w, Z_w = get_ground_coordinates(x_indices, y_indices)
+        valid_indices = (Z_w < 50.0)
+        if valid_indices.sum() > 0:
+            width_m = float(np.max(X_w[valid_indices]) - np.min(X_w[valid_indices]))
+            length_m = float(np.max(Z_w[valid_indices]) - np.min(Z_w[valid_indices]))
+        else:
+            width_m = 0.0
+            length_m = 0.0
         
         # 3. Physical Depth (Only applicable to Potholes/Water Potholes)
         depth_cm = 0.0
@@ -131,15 +144,12 @@ class RoadHazardEstimator:
                 
                 # Get the flat road reference for the boundary pixels
                 # Pothole actual depth is depth_measured - depth_road_flat
-                # For each pixel inside the pothole, compare it to the expected road surface distance
                 h, w = calibrated_Z.shape[:2]
                 if self.flat_road_Z.shape != (h, w):
                     flat_road_Z_resized = cv2.resize(self.flat_road_Z, (w, h), interpolation=cv2.INTER_LINEAR)
                 else:
                     flat_road_Z_resized = self.flat_road_Z
                     
-                # The depth is the difference between the calibrated Z inside the pothole
-                # and the expected flat road Z at that same pixel coordinate.
                 road_plane_Z = flat_road_Z_resized[y_indices, x_indices]
                 pothole_measured_Z = calibrated_Z[y_indices, x_indices]
                 
@@ -149,9 +159,17 @@ class RoadHazardEstimator:
                 depth_cm = max(0.0, depth_cm)  # Ensure positive depth
             else:
                 depth_cm = 0.0
+        
+        # Calculate volume (pi / 6 * width * length * depth_m)
+        depth_m = depth_cm / 100.0
+        volume_m3 = (np.pi / 6.0) * width_m * length_m * depth_m
                 
         return {
             'distance_m': round(distance_m, 2),
             'depth_cm': round(depth_cm, 1),
-            'area_m2': round(area_m2, 3)
+            'area_m2': round(area_m2, 3),
+            'width_m': round(width_m, 2),
+            'length_m': round(length_m, 2),
+            'volume_m3': round(volume_m3, 4)
         }
+

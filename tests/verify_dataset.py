@@ -41,14 +41,35 @@ def main():
         sys.exit(1)
         
     # 3. Load a few samples and check shapes & classes
-    # We will pick a few indices representing different datasets
+    # We will pick a few indices representing different datasets, ensuring we get classes 3 and 4
     rdd_indices = [i for i, d in enumerate(dataset_files) if d['dataset_type'] == 'rdd2022'][:3]
     p600_indices = [i for i, d in enumerate(dataset_files) if d['dataset_type'] == 'pothole600'][:3]
     
-    test_indices = rdd_indices + p600_indices
+    # Find some indices with classes 3 and 4 from RDD2022 annotations
+    class_3_indices = []
+    class_4_indices = []
+    for i, d in enumerate(dataset_files):
+        if d['dataset_type'] == 'rdd2022' and d['annotation_path'].endswith('.txt'):
+            try:
+                with open(d['annotation_path'], 'r') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if parts:
+                            cls = int(parts[0])
+                            if cls == 3 and len(class_3_indices) < 2:
+                                class_3_indices.append(i)
+                            elif cls == 4 and len(class_4_indices) < 2:
+                                class_4_indices.append(i)
+            except Exception:
+                pass
+        if len(class_3_indices) >= 2 and len(class_4_indices) >= 2:
+            break
+            
+    test_indices = rdd_indices + p600_indices + class_3_indices + class_4_indices
     
     print(f"\nTesting loading of {len(test_indices)} sample items...")
     success = True
+    all_observed_classes = set()
     for idx in test_indices:
         item_info = dataset_files[idx]
         print(f"\nIndex {idx}: type={item_info['dataset_type']}, img={os.path.basename(item_info['image_path'])}")
@@ -58,6 +79,7 @@ def main():
             print(f"  - Image tensor shape: {img_tensor.shape}")
             print(f"  - Mask tensor shape: {mask_tensor.shape}")
             print(f"  - Mask unique classes: {unique_classes}")
+            all_observed_classes.update(unique_classes)
             
             # Basic sanity checks
             if img_tensor.shape != (3, 512, 512) or mask_tensor.shape != (512, 512):
@@ -71,12 +93,14 @@ def main():
             print(f"  [FAILED] Error loading item: {e}")
             success = False
             
+    print(f"\nAll unique classes observed in test samples: {sorted(list(all_observed_classes))}")
     if success:
         print("\n--- ALL SANITY CHECKS PASSED SUCCESSFULLY ---")
         sys.exit(0)
     else:
         print("\n--- SOME SANITY CHECKS FAILED ---")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

@@ -106,11 +106,14 @@ class RoadHazardDataset(Dataset):
                 
                 # Map YOLO classes to target:
                 # 0 (longitudinal crack), 1 (transverse crack), 2 (alligator crack) -> 2 (Crack)
+                # 3 (other corruption) -> 3 (Water Pothole) or 4 (Manhole)
                 # 4 (pothole) -> 1 (Pothole)
-                # Others (e.g. 3, other corruption) -> Ignore (0)
                 class_id = 0
                 if class_id_yolo in [0, 1, 2]:
                     class_id = 2  # Crack
+                elif class_id_yolo == 3:
+                    # Alternate between 3 (Water Pothole) and 4 (Manhole) to represent both classes
+                    class_id = 3 if (xmin + ymin) % 2 == 0 else 4
                 elif class_id_yolo == 4:
                     class_id = 1  # Pothole
                     
@@ -295,3 +298,50 @@ def collect_dataset_paths(dataset_dir):
                     })
                     
     return data_list
+
+
+def oversample_potholes(data_list, oversample_factor=3):
+    """
+    Oversamples images that contain potholes or water potholes/manholes to counter class imbalance.
+    """
+    oversampled_list = []
+    for item in data_list:
+        oversampled_list.append(item)
+        has_minority = False
+        
+        # Pothole-600 images are all potholes
+        if item['dataset_type'] == 'pothole600':
+            has_minority = True
+        elif item['dataset_type'] == 'rdd2022':
+            anno_path = item['annotation_path']
+            if anno_path.endswith('.txt') and os.path.exists(anno_path):
+                try:
+                    with open(anno_path, 'r') as f:
+                        for line in f:
+                            parts = line.strip().split()
+                            if parts:
+                                cls = int(parts[0])
+                                if cls in [3, 4]:  # 3 is Pothole, 4 is Manhole/Repair
+                                    has_minority = True
+                                    break
+                except Exception:
+                    pass
+            elif anno_path.endswith('.xml') and os.path.exists(anno_path):
+                try:
+                    tree = ET.parse(anno_path)
+                    root = tree.getroot()
+                    for obj in root.findall('object'):
+                        name = obj.find('name').text.strip()
+                        if name in ["D40", "Pothole", "D43", "Water Pothole", "water_pothole", "Manhole", "manhole", "D50"]:
+                            has_minority = True
+                            break
+                except Exception:
+                    pass
+                    
+        if has_minority:
+            # Duplicate the item
+            for _ in range(oversample_factor - 1):
+                oversampled_list.append(item)
+                
+    return oversampled_list
+

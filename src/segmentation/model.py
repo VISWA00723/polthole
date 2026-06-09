@@ -84,39 +84,47 @@ class DiceLoss(nn.Module):
 
 class RoadHazardLoss(nn.Module):
     """
-    Combined Segmentation Loss: 60% Focal Loss + 40% Dice Loss.
+    Combined Segmentation Loss: Supports both Weighted CrossEntropy + Dice Loss
+    and Focal Loss + Dice Loss.
     """
-    def __init__(self, alpha=None, gamma=2.0, weight_focal=0.6, weight_dice=0.4):
+    def __init__(self, alpha=None, gamma=2.0, weight_ce_or_focal=0.6, weight_dice=0.4, mode='ce'):
         super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.weight_ce_or_focal = weight_ce_or_focal
+        self.weight_dice = weight_dice
+        self.mode = mode
+        
         self.focal = FocalLoss(alpha=alpha, gamma=gamma)
         self.dice = DiceLoss()
-        self.weight_focal = weight_focal
-        self.weight_dice = weight_dice
 
     def forward(self, inputs, targets):
-        focal_loss = self.focal(inputs, targets)
+        if self.mode == 'focal':
+            base_loss = self.focal(inputs, targets)
+        else:
+            # Weighted CrossEntropy Loss
+            log_softmax = F.log_softmax(inputs, dim=1)
+            base_loss = F.nll_loss(log_softmax, targets, weight=self.alpha)
+            
         dice_loss = self.dice(inputs, targets)
-        return self.weight_focal * focal_loss + self.weight_dice * dice_loss
+        return self.weight_ce_or_focal * base_loss + self.weight_dice * dice_loss
 
 
-def get_segformer_b3_model(pretrained=True):
+
+def get_segformer_model(pretrained=True):
     """
-    Creates and returns a SegFormer-B3 model.
-    If pretrained is True, it downloads pre-trained mit-b3 weights.
+    Creates and returns a SegFormer model based on config.SEGFORMER_BACKBONE.
     """
-    # Use HuggingFace's SegformerForSemanticSegmentation
-    # Since we are using standard mit-b3 as a backbone, we'll initialize the config and set the classification head
     if pretrained:
-        print(f"Loading pretrained SegFormer-B3 backbone: {config.SEGFORMER_BACKBONE}")
-        # Note: SegformerForSemanticSegmentation from_pretrained will load the model weights,
-        # and ignore the classification head since we are setting num_labels dynamically.
+        print(f"Loading pretrained SegFormer backbone: {config.SEGFORMER_BACKBONE}")
         model = SegformerForSemanticSegmentation.from_pretrained(
             config.SEGFORMER_BACKBONE,
             num_labels=config.NUM_CLASSES,
-            ignore_mismatched_sizes=True
+            ignore_mismatched_sizes=True,
+            use_safetensors=True
         )
     else:
-        print("Initializing new SegFormer-B3 configuration...")
+        print(f"Initializing new SegFormer configuration for: {config.SEGFORMER_BACKBONE}...")
         configuration = SegformerConfig.from_pretrained(
             config.SEGFORMER_BACKBONE,
             num_labels=config.NUM_CLASSES
@@ -124,3 +132,129 @@ def get_segformer_b3_model(pretrained=True):
         model = SegformerForSemanticSegmentation(configuration)
         
     return model
+
+# Keep alias for backwards compatibility
+get_segformer_b3_model = get_segformer_model
+
+
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation Block for attention-based feature refinement."""
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = F.adaptive_avg_pool2d(x, 1).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+
+
+class MultiTaskRoadHazardModel(nn.Module):
+    """
+    Multi-Task Learning Network wrapping SegFormer.
+    Outputs:
+      1. Segmentation logits (B, NumClasses, H, W)
+      2. Severity prediction (B, 3) -> Low, Medium, High
+      3. Road Quality score (B, 1) -> [0, 10]
+      4. Collision Risk score (B, 1) -> [0, 100]
+    """
+    def __init__(self, segformer_model, hidden_dim=512):
+        super().__init__()
+        self.segformer = segformer_model
+        
+        # Attention module
+        self.attention = SEBlock(channels=hidden_dim)
+        
+        # Severity prediction head
+        self.severity_head = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 3)
+        )
+        
+        # Road score regression head
+        self.road_score_head = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+        
+        # Risk score prediction head (takes pooled features + physical inputs: area, depth, distance, speed)
+        self.risk_head = nn.Sequential(
+            nn.Linear(hidden_dim + 4, 128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, pixel_values, physical_inputs=None):
+        # Forward pass through SegFormer backbone
+        outputs = self.segformer(pixel_values=pixel_values, output_hidden_states=True)
+        logits = outputs.logits  # B x NumClasses x H/4 x W/4
+        
+        # Extract last stage encoder features
+        # Segformer hidden states contains: input embedding + 4 encoder stages
+        if outputs.hidden_states is not None and len(outputs.hidden_states) > 0:
+            feat = outputs.hidden_states[-1] # B x C x H/32 x W/32
+            # Apply attention
+            feat = self.attention(feat)
+            # Global pooling
+            pooled = F.adaptive_avg_pool2d(feat, (1, 1)).squeeze(-1).squeeze(-1)
+        else:
+            # Fallback to pooling logits
+            pooled = F.adaptive_avg_pool2d(logits, (1, 1)).squeeze(-1).squeeze(-1)
+            # Pad to match hidden_dim if needed
+            if pooled.shape[-1] < 512:
+                pad_size = 512 - pooled.shape[-1]
+                pooled = F.pad(pooled, (0, pad_size))
+                
+        severity_logits = self.severity_head(pooled)
+        road_score = self.road_score_head(pooled) * 10.0
+        
+        if physical_inputs is None:
+            physical_inputs = torch.zeros(pixel_values.shape[0], 4, device=pixel_values.device)
+            
+        risk_input = torch.cat([pooled, physical_inputs], dim=-1)
+        risk_score = self.risk_head(risk_input) * 100.0
+        
+        return logits, severity_logits, road_score, risk_score
+
+
+class EnsembleRoadSegmenter(nn.Module):
+    """
+    Ensemble model combining SegFormer and DeepLabV3+ predictions.
+    """
+    def __init__(self, segformer_model, deeplabv3_model=None):
+        super().__init__()
+        self.segformer = segformer_model
+        self.deeplabv3 = deeplabv3_model
+
+    def forward(self, pixel_values):
+        outputs_seg = self.segformer(pixel_values=pixel_values)
+        logits_seg = outputs_seg.logits
+        
+        # Upscale SegFormer logits
+        logits_seg_upscaled = F.interpolate(
+            logits_seg,
+            size=pixel_values.shape[-2:],
+            mode="bilinear",
+            align_corners=False
+        )
+        
+        if self.deeplabv3 is not None:
+            logits_deep = self.deeplabv3(pixel_values)
+            # Average predictions (ensemble)
+            return (logits_seg_upscaled + logits_deep) / 2.0
+        
+        return logits_seg_upscaled
+

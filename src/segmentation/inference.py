@@ -8,12 +8,13 @@ import cv2
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from segmentation.model import get_segformer_b3_model
+from segmentation.model import get_segformer_model, MultiTaskRoadHazardModel
 
 class RoadDamageSegmenter:
     def __init__(self, device=None):
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = get_segformer_b3_model(pretrained=True)
+        base_model = get_segformer_model(pretrained=True)
+        self.model = MultiTaskRoadHazardModel(base_model, hidden_dim=512)
         
         # Load weights if available
         if os.path.exists(config.SEGMENTATION_WEIGHTS):
@@ -62,8 +63,12 @@ class RoadDamageSegmenter:
         input_tensor = self.preprocess(img_bgr)
         
         # Inference
-        outputs = self.model(pixel_values=input_tensor)
-        logits = outputs.logits
+        logits, severity_logits, road_score, risk_score = self.model(input_tensor)
+        
+        # Store latest multi-task predictions for access by downstream pipeline
+        self.latest_severity = int(torch.argmax(severity_logits, dim=1).item())
+        self.latest_road_score = float(road_score.item())
+        self.latest_risk_score = float(risk_score.item())
         
         # Interpolate logits back to original image size
         logits_upscaled = F.interpolate(

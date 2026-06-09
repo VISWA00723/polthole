@@ -21,8 +21,8 @@ PRINCIPAL_POINT_X = 640.0      # Camera optical center X coordinate (px)
 PRINCIPAL_POINT_Y = 360.0      # Camera optical center Y coordinate (px)
 
 # --- Model Architectures and Parameters ---
-# SegFormer-B3 Parameters
-SEGFORMER_BACKBONE = "nvidia/mit-b3"
+# SegFormer-B5 Parameters
+SEGFORMER_BACKBONE = "nvidia/mit-b5"
 NUM_CLASSES = 5
 CLASS_MAP = {
     0: "background",
